@@ -33,3 +33,7 @@ kscreenlockerrc
 # Local scratch
 /tmp/
 *.log
+
+# Go binaries
+wallpaper-switcher-plasma
+daemon-plasma/wallpaper-switcher-plasma

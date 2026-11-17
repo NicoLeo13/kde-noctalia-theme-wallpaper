@@ -1,35 +1,48 @@
-# Noctalia theme → wallpaper switcher
+# KDE Plasma & Noctalia: Theme-Reactive Wallpaper Switcher
 
-Makes the desktop wallpaper follow Noctalia's resolved theme mode: a light
-wallpaper in light mode, a dark wallpaper in dark mode. Reacts to both manual
-toggles and the automatic sunrise/sunset flip when `[theme].mode = "auto"`.
+A theme-aware wallpaper switcher with automatic desktop environment detection for **KDE Plasma** and **Noctalia** (KineticWE).
 
-Works on Noctalia 5.2+ (plugin API irrelevant — this uses the shell hook system,
-not the plugin API).
+Makes your desktop wallpaper and lock screen follow the active theme mode: a light wallpaper in light mode, and a dark wallpaper in dark mode. Reacts to manual theme toggles, KDE color-scheme switches (including `AutomaticLookAndFeel` day/night and `kde-material-you-colors`), and Noctalia's sunrise/sunset flips.
+
+* **Automatic Desktop Detection**: Detects whether you are running **KDE Plasma** or **Noctalia / KineticWE** and applies wallpapers using the native interface (`plasma-apply-wallpaperimage` on Plasma, `noctalia-kwe msg wallpaper-set` on Noctalia).
+* **Isolated Environment Configs**: Supports per-environment configs (`KDE_` prefixed options for Plasma alongside base options for Noctalia), coexisting without conflicts.
+* **Low-Resource Reactive Daemon for KDE**: Provides a ~4 MB Go daemon (`wallpaper-switcher-plasma`) that listens on D-Bus without consuming CPU cycles.
 
 ## How it works
 
-Noctalia fires a `theme_mode_changed` hook whenever the resolved mode flips
-between `light` and `dark`, and exports `$NOCTALIA_THEME_MODE`. A small script
-maps that mode to a wallpaper you choose and applies it with
-`noctalia msg wallpaper-set`.
-
-It is fully event-driven: no polling, no background process, no wakeups.
+The tool reacts to theme switches across both supported desktop environments:
 
 ```
-GNOME/KDE color-scheme, control center, theme-mode-toggle, sunrise/sunset
-        │
-        ▼
-  Noctalia [theme].mode ──► theme_mode_changed hook
-                                  │
-                                  ▼
-                        theme-wallpaper.sh
-                                  │
-                    STRATEGY = fixed | random | cycle
-                                  │
-                                  ▼
-                    noctalia msg wallpaper-set <path>
+   KDE Plasma Session                          Noctalia / KineticWE Session
+   ──────────────────                          ────────────────────────────
+KDE color scheme change                     Noctalia [theme].mode change
+(System Settings, daylight, material-you)   (manual toggle, sunrise/sunset)
+         │                                               │
+         ▼                                               ▼
+D-Bus signal / kdeglobals change            `theme_mode_changed` hook
+         │                                               │
+         ▼                                               │
+Go Daemon: wallpaper-switcher-plasma                     │
+(ultra-lightweight, ~4MB, zero CPU)                      │
+         │                                               │
+         └───────────────────────┬───────────────────────┘
+                                 │
+                                 ▼
+                         theme-wallpaper.sh
+             (Auto-detects XDG_CURRENT_DESKTOP session)
+                                 │
+                 STRATEGY = fixed | random | cycle
+                                 │
+                 ┌───────────────┴───────────────┐
+                 │                               │
+                 ▼                               ▼
+            KDE Plasma:                  Noctalia / KineticWE:
+   plasma-apply-wallpaperimage <path>    noctalia msg wallpaper-set <path>
+   + kscreenlockerrc lockscreen sync     + palette generation / sync
 ```
+
+* **Noctalia / KineticWE**: Fully hook-driven. Noctalia exports `$NOCTALIA_THEME_MODE` and invokes `theme-wallpaper.sh`. No background process is needed.
+* **KDE Plasma**: Plasma doesn't have an external hook system for wallpaper scripts, so an ultra-lightweight Go daemon (`wallpaper-switcher-plasma`, ~4 MB RAM, 0% CPU) monitors session D-Bus and `kdeglobals`, triggering `theme-wallpaper.sh` on changes.
 
 ## Install
 
@@ -41,14 +54,14 @@ Then either open **Noctalia Theme Wallpaper** from the app menu, or edit the fil
 by hand:
 
 ```sh
-vim ~/.config/noctalia/theme-wallpaper.conf
+vim ~/.config/noctalia-kwe/theme-wallpaper.conf
 ```
 
 Test without changing anything:
 
 ```sh
-THEME_WALLPAPER_DRY_RUN=1 ~/.config/noctalia/hooks/theme-wallpaper.sh
-noctalia msg theme-mode-toggle
+THEME_WALLPAPER_DRY_RUN=1 ~/.config/noctalia-kwe/hooks/theme-wallpaper.sh
+noctalia-kwe msg theme-mode-toggle
 ```
 
 Run the hook only if you changed Noctalia settings. The wallpaper hook file is
@@ -62,7 +75,7 @@ To remove:
 
 ## Configuration
 
-`~/.config/noctalia/theme-wallpaper.conf`
+`~/.config/noctalia-kwe/theme-wallpaper.conf` (or `~/.config/noctalia/theme-wallpaper.conf` on vanilla Noctalia)
 
 | Key | Meaning |
 | --- | --- |
@@ -70,15 +83,12 @@ To remove:
 | `DARK_WALLPAPER` / `LIGHT_WALLPAPER` | exact image per mode, for `fixed` |
 | `DARK_DIR` / `LIGHT_DIR` | folder to scan per mode, for `random` / `cycle` |
 | `CONNECTORS` | optional space-separated outputs; empty = all outputs in sync |
-| `LOCKSCREEN_SYNC` | `false` leaves the KDE lock screen alone entirely |
-| `LOCKSCREEN_SOURCE` | `desktop` (default) or `custom` |
-| `LOCKSCREEN_DARK_WALLPAPER` / `LOCKSCREEN_LIGHT_WALLPAPER` | lock screen image per mode, for `custom` |
 
-Both strategies you asked for are supported:
+All three strategies are supported:
 
 - **`fixed`** — one specific image per mode.
 - **`random`** — a fresh random image from that mode's folder on every switch.
-- **`cycle`** — bonus: walks the folder in order and wraps, so no image repeats
+- **`cycle`** — walks the folder in order and wraps, so no image repeats
   until every one has been used.
 
 For `random` and `cycle`, create the folders and put images in them:
@@ -89,42 +99,56 @@ mkdir -p ~/Pictures/Wallpapers/{dark,light}
 
 Only image files directly inside each folder are used; subfolders are ignored.
 
+## Multi-environment support (KDE Plasma & Noctalia)
+
+The application automatically detects the active desktop environment (`XDG_CURRENT_DESKTOP` / `KDE_FULL_SESSION`):
+- **Banner indicator**: Displays the detected session at the top (e.g., `KDE Plasma session detected (Plasma 6)` or `Noctalia session detected`).
+- **Per-environment wallpapers and folders**: In KDE Plasma, settings prefixed with `KDE_` (such as `KDE_STRATEGY`, `KDE_LIGHT_WALLPAPER`, `KDE_DARK_WALLPAPER`, `KDE_LIGHT_DIR`, and `KDE_DARK_DIR`) are used and saved, falling back to base keys if unset. In Noctalia / KineticWE, the base keys are used. Both desktop setups coexist cleanly without overriding or breaking each other.
+- **KDE Plasma behavior**: In Plasma sessions, wallpapers are applied natively with `plasma-apply-wallpaperimage`, the lock screen is synced via `~/.config/kscreenlockerrc`, and palette generation is bypassed (relying on `kde-material-you-colors`).
+
+## KDE Plasma Daemon (`wallpaper-switcher-plasma`)
+
+In Noctalia, the shell fires hooks automatically when the theme changes. In KDE Plasma, there is no built-in wallpaper hook. To bridge this gap, a dedicated, ultra-low-resource daemon is provided in `daemon-plasma/`.
+
+- **Purely reactive architecture**: Written in Go, it connects to Linux session D-Bus (`org.kde.KGlobalSettings.notifyChange` / `org.freedesktop.portal.Settings.SettingChanged`) and checks `~/.config/kdeglobals` every 2 seconds, consuming **near 0.0% CPU** and only ~**4 MB RAM**.
+- **KDE Plasma theme ownership**: The daemon **never** changes or applies KDE color schemes itself. Instead, it respects KDE's native day/night switching (`AutomaticLookAndFeel=true`), user System Settings changes, or `kde-material-you-colors`, resolving whether the active theme is `light` or `dark` from `kdeglobals` and invoking `theme-wallpaper.sh` so your wallpaper and lockscreen match.
+- **Session-isolated**: The daemon checks `XDG_CURRENT_DESKTOP` on launch. If you log into KineticWE or another shell, it exits immediately and never touches non-KDE sessions.
+
+### Building and Managing the Daemon
+
+#### Automatic setup:
+`./install.sh` automatically compiles the binary and enables the user systemd service if `go` is installed on your system.
+
+#### Manual compilation:
+```bash
+cd daemon-plasma
+go build -ldflags="-s -w" -o wallpaper-switcher-plasma .
+cp wallpaper-switcher-plasma ~/.local/bin/
+```
+
+#### Service controls:
+```bash
+systemctl --user status wallpaper-switcher-plasma.service
+systemctl --user restart wallpaper-switcher-plasma.service
+journalctl --user -u wallpaper-switcher-plasma.service -f
+```
+
+For a comprehensive beginner guide and detailed breakdown of the logic, see [Wiki Chapter 27: The KDE Plasma Daemon](docs/wiki/27-the-kde-plasma-daemon.md).
+
 ## KDE lock screen
 
-On KDE Plasma the lock screen is `kscreenlocker_greet`. It reads its background
+On KDE Plasma, the lock screen is `kscreenlocker_greet`. It reads its background
 from the `[Greeter][Wallpaper][org.kde.image][General]` group in
-`~/.config/kscreenlockerrc`, which is the same block KDE's own Screen Locking
-settings page writes. There is no separate tool. The hook rewrites the `Image=`
-and `PreviewImage=` keys in place.
+`~/.config/kscreenlockerrc`. When running in KDE Plasma, the GUI displays the **KDE lock screen** tab:
+- `LOCKSCREEN_SYNC`: Enable or disable lock screen background updates.
+- `LOCKSCREEN_SOURCE`: `desktop` (matches the active wallpaper) or `custom` (distinct light/dark wallpapers configured via `LOCKSCREEN_LIGHT_WALLPAPER` / `LOCKSCREEN_DARK_WALLPAPER`).
 
-Because `kscreenlocker_greet` starts fresh each time the screen locks, writing the
-file before a lock is enough. No reload and no extra process is involved.
+## Noctalia lock screen
 
-The lock screen follows **every** wallpaper change, not only a theme mode
-change. The hook listens for Noctalia's `wallpaper_changed` event, so picking a
-new wallpaper in the Noctalia panel, with a plugin, or with another tool all
-update the lock screen too. When the wallpaper was changed by something else,
-the hook reconciles the lock screen and leaves the desktop wallpaper alone.
-
-`LOCKSCREEN_SOURCE` chooses the behavior:
-
-- `desktop` (default) — the lock screen shows the same image as the desktop. There
-  is nothing extra to configure and the two can never disagree.
-- `custom` — the lock screen uses its own image per mode. An empty value falls
-  back to the desktop wallpaper for that mode, so a half-filled setup still works.
-
-The write is atomic and preserves every other key in the file, because KDE also
-writes this file from its own settings page. Atomic here means a reader never
-sees a half-written file. It does not stop KDE and this script from writing at
-the same instant, which is extremely unlikely but not impossible. Spaces and `%` in a path are
-percent-encoded, since KDE stores a URL. If `kscreenlockerrc` does not exist the
-step is skipped rather than fabricating a KDE config.
-
-This only applies to KDE's lock screen. For the Noctalia lock screen, enable
-`[lockscreen]` and leave its `wallpaper` key empty, and it uses the desktop
-wallpaper per output, which this hook already switches. Note that enabling
-`[lockscreen]` hands session locking to Noctalia, and its blurred-desktop
-background needs screencopy, which KWin does not provide.
+In KineticWE V2, session locking is handled natively by Noctalia Lockscreen.
+When `[lockscreen].wallpaper` is left empty in Noctalia's settings, the lock
+screen automatically uses the active desktop wallpaper per output, which this
+hook switches on every mode change.
 
 ## Palette
 
@@ -197,19 +221,10 @@ journalctl -t noctalia-theme-wallpaper -f
 the IPC call when the target image is already applied, avoiding a redundant
 reload and its transition flash.
 
-**Reconciled, not short-circuited.** The desktop wallpaper and the lock screen
-are two separate states that can drift apart, so the lock screen step runs even
-when the desktop image is already applied and nothing needed changing.
-
-**The lock screen write is a no-op when nothing changed.** If the file already
-points at the right image, the hook leaves it completely alone. Rewriting an
-identical file would give it a new inode, and that is what breaks the file watch
-a desktop uses to notice a theme change.
-
 **The hook listens for three events.** `theme_mode_changed` picks and applies
 the image. `started` covers a session that boots already in a given mode.
 `wallpaper_changed` covers a wallpaper change made by anything else, and it only
-reconciles the lock screen so the script never changes the wallpaper back.
+reconciles the palette so the script never changes the wallpaper back.
 
 **Palette synergy.** Your `[theme].source = "wallpaper"` means Noctalia
 regenerates the palette from the current wallpaper on every change. So the
@@ -221,8 +236,8 @@ An optional GTK 4 / libadwaita window edits the same config file. Start it from
 the app menu as **Noctalia Theme Wallpaper**.
 
 It gives you a thumbnail grid for picking the light and dark wallpaper, folder
-pickers, the strategy selector, the lock screen mode, and **Apply now** and
-**Dry run** buttons. Dry run shows exactly what the hook would do and changes
+pickers, the strategy selector, the palette generator controls, and **Apply now**
+and **Dry run** buttons. Dry run shows exactly what the hook would do and changes
 nothing.
 
 The window follows Noctalia's current theme mode, so it is dark when Noctalia is
@@ -242,9 +257,10 @@ The **Palette** tab shows the palette the current wallpaper produces, with a
 swatch for every colour role. **Draw a new one** makes another palette from the
 same wallpaper, and **Save this palette** keeps it.
 
-A saved palette is written into `~/.config/noctalia/palettes/`, which is the
-folder Noctalia reads. It therefore appears in Noctalia's own custom palette
-list straight away, with a preview, and needs nothing else to work.
+A saved palette is written into `~/.config/noctalia-kwe/palettes/` (or
+`~/.config/noctalia/palettes/`), which is the folder Noctalia reads. It
+therefore appears in Noctalia's own custom palette list straight away, with a
+preview, and needs nothing else to work.
 
 The window lists the saved palettes twice. **Saved for this wallpaper** holds
 the ones that belong to the wallpaper on screen, and **All custom palettes**
@@ -273,10 +289,10 @@ lets you set the mode to `dark` or `light` instead of `auto`, and when it is
 pinned the day and night schedule never runs, so the wallpaper quietly stops
 following the sun. The window notices that and offers a way back.
 
-The other two tabs keep up as well. Each has a **Right now** group that shows
-the picture the desktop is really using, and the wallpaper on screen is marked in
-the picker with a border of its own, so it cannot be mistaken for the image that
-is selected.
+The Desktop wallpaper tab has a **Right now** group that shows the picture the
+desktop is really using, and the wallpaper on screen is marked in the picker
+with a border of its own, so it cannot be mistaken for the image that is
+selected.
 
 The name of a saved palette is up to you. A name that starts with the wallpaper
 name groups it under that wallpaper.
@@ -302,8 +318,9 @@ that looks wrong in one place and right in the other is worth reporting.
 
 ```
 install.sh                              install / uninstall
-files/hooks-theme-wallpaper.toml        [hooks] wiring (theme_mode_changed, started)
+files/hooks-theme-wallpaper.toml        [hooks] wiring (theme_mode_changed, started, wallpaper_changed)
 files/theme-wallpaper.sh                the script Noctalia runs
+files/palette-generator.py              the wallpaper palette generator
 files/theme-wallpaper.conf.example      config template with docs
 gui/theme-wallpaper-gui.py              GTK 4 / libadwaita settings window
 gui/theme-wallpaper-gui.desktop         app menu launcher

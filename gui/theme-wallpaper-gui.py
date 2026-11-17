@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Graphical settings for the Noctalia theme wallpaper switcher.
 
-Edits ~/.config/noctalia/theme-wallpaper.conf, which is the same file the
-theme_mode_changed hook reads. Saving needs no reload, because the hook re-reads
-the file on every switch.
+Edits ~/.config/noctalia-kwe/theme-wallpaper.conf (or ~/.config/noctalia/theme-wallpaper.conf),
+which is the same file the theme_mode_changed hook reads. Saving needs no reload,
+because the hook re-reads the file on every switch.
 
 Uses the standard library and the GTK 4 / libadwaita introspection bindings only.
 """
@@ -13,11 +13,12 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
 import stat
 import subprocess
-import tomllib
 import sys
 import tempfile
+import tomllib
 
 import gi
 
@@ -93,6 +94,16 @@ VARIANTS = (
 )
 
 
+def noctalia_bin() -> str:
+    """Resolve the Noctalia binary, preferring KineticWE V2's noctalia-kwe."""
+    explicit = os.environ.get("NOCTALIA_BIN")
+    if explicit:
+        return explicit
+    if shutil.which("noctalia-kwe"):
+        return "noctalia-kwe"
+    return "noctalia"
+
+
 def load_generator():
     """Load the palette generator.
 
@@ -131,7 +142,12 @@ def config_home() -> str:
     if explicit:
         return explicit
     base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
-    return os.path.join(base, "noctalia")
+    dir_name = (
+        "noctalia-kwe"
+        if os.path.basename(noctalia_bin()) == "noctalia-kwe"
+        else "noctalia"
+    )
+    return os.path.join(base, dir_name)
 
 
 DEFAULT_CONF = os.path.join(config_home(), "theme-wallpaper.conf")
@@ -197,6 +213,14 @@ class Config:
         value = self.values.get(key, "")
         return value if value else default
 
+    def get_scoped(self, key: str, prefix: str = "", default: str = "") -> str:
+        """Get a setting scoped to an environment (e.g. KDE_<key>), falling back to <key>."""
+        if prefix:
+            v = self.values.get(f"{prefix}_{key}", "")
+            if v:
+                return v
+        return self.get(key, default)
+
     def set(self, key: str, value: str) -> None:
         # A newline inside a value would become a second line with no "=",
         # which the reader then drops, silently destroying the setting.
@@ -221,6 +245,11 @@ class Config:
                 out.append("")
             out.append(f"{key} = {value}")
         self.lines = out
+
+    def set_scoped(self, key: str, value: str, prefix: str = "") -> None:
+        """Set a setting scoped to an environment (e.g. KDE_<key>) or base key."""
+        target_key = f"{prefix}_{key}" if prefix else key
+        self.set(target_key, value)
 
     def on_disk(self) -> str:
         """The raw text currently on disk, or an empty string."""
@@ -324,10 +353,104 @@ def run_hook(hook: str, conf: str, dry_run: bool) -> tuple[int, str]:
     return done.returncode, "\n".join(lines) if lines else "(no output)"
 
 
+def detect_session() -> tuple[str, str]:
+    """Detect whether we are in a KDE Plasma session or Noctalia/KineticWE."""
+    xdg = os.environ.get("XDG_CURRENT_DESKTOP", "")
+    kde_session = os.environ.get("KDE_FULL_SESSION", "")
+    kde_version = os.environ.get("KDE_SESSION_VERSION", "")
+    if "KDE" in xdg.upper() or kde_session.lower() == "true":
+        v = f" (Plasma {kde_version})" if kde_version else ""
+        return "kde", f"KDE Plasma session detected{v}"
+    return "noctalia", "Noctalia session detected"
+
+
+def current_kde_theme_mode() -> str:
+    """Read the active KDE color scheme mode (light or dark)."""
+    scheme = ""
+    for tool in ("kreadconfig6", "kreadconfig5"):
+        if shutil.which(tool):
+            try:
+                done = subprocess.run(
+                    [tool, "--file", "kdeglobals", "--group", "General", "--key", "ColorScheme"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                scheme = done.stdout.strip()
+                if scheme:
+                    break
+            except (OSError, subprocess.SubprocessError):
+                pass
+    if not scheme:
+        kdeglobals = os.path.expanduser("~/.config/kdeglobals")
+        if os.path.isfile(kdeglobals):
+            try:
+                with open(kdeglobals, "r", encoding="utf-8", errors="replace") as f:
+                    for line in f:
+                        if line.startswith("ColorScheme="):
+                            scheme = line.split("=", 1)[1].strip()
+                            break
+            except OSError:
+                pass
+    return "dark" if "dark" in scheme.lower() else "light"
+
+
+def current_kde_wallpaper() -> str:
+    """Read the active desktop wallpaper from KDE Plasma's desktop-appletsrc."""
+    appletsrc = os.environ.get(
+        "THEME_WALLPAPER_APPLETSRC",
+        os.path.expanduser("~/.config/plasma-org.kde.plasma.desktop-appletsrc"),
+    )
+    if not os.path.isfile(appletsrc):
+        return ""
+    try:
+        import urllib.parse
+
+        with open(appletsrc, "r", encoding="utf-8", errors="replace") as f:
+            in_group = False
+            for line in f:
+                stripped = line.strip()
+                if stripped.startswith("[") and stripped.endswith("]"):
+                    in_group = "[Wallpaper][org.kde.image][General]" in stripped
+                elif in_group and stripped.startswith("Image="):
+                    val = stripped.split("=", 1)[1].strip()
+                    if val.startswith("file://"):
+                        val = urllib.parse.unquote(val[7:])
+                    return val
+    except OSError:
+        pass
+    return ""
+
+
+def current_kde_lockscreen() -> str:
+    """Read the lock screen image from KDE Plasma's kscreenlockerrc."""
+    path = os.environ.get(
+        "THEME_WALLPAPER_LOCKSCREEN_RC", os.path.expanduser("~/.config/kscreenlockerrc")
+    )
+    if not os.path.isfile(path):
+        return ""
+    try:
+        import urllib.parse
+
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if line.startswith("Image="):
+                    val = line.split("=", 1)[1].strip()
+                    if val.startswith("file://"):
+                        val = urllib.parse.unquote(val[7:])
+                    return val
+    except OSError:
+        pass
+    return ""
+
+
 def current_theme_mode() -> str:
+    session, _ = detect_session()
+    if session == "kde":
+        return current_kde_theme_mode()
     try:
         done = subprocess.run(
-            ["noctalia", "msg", "theme-mode-get"], capture_output=True, text=True, timeout=15
+            [noctalia_bin(), "msg", "theme-mode-get"], capture_output=True, text=True, timeout=15
         )
     except (OSError, subprocess.SubprocessError):
         return "unknown"
@@ -405,10 +528,10 @@ class PickerGroup(Adw.PreferencesGroup):
         self.grid.attach(self.empty, 0, 0, GRID_COLUMNS, 1)
 
     # ---------------------------------------------------------------- state
-    def load_from(self, cfg: Config) -> None:
-        if self.folder_row is not None:
-            self.folder_row.set_text(cfg.get(self.folder_key))
-        self.set_file(cfg.get(self.file_key))
+    def load_from(self, cfg: Config, prefix: str = "") -> None:
+        if self.folder_row is not None and self.folder_key:
+            self.folder_row.set_text(cfg.get_scoped(self.folder_key, prefix))
+        self.set_file(cfg.get_scoped(self.file_key, prefix))
 
     def set_file(self, path: str) -> None:
         self.selected = expand(path.strip()) if path else ""
@@ -431,6 +554,7 @@ class PickerGroup(Adw.PreferencesGroup):
         self._next_cell = 0
 
         self.images = scan_images(self.current_folder())
+        self.buttons = {}
 
         rendered = 0
         for path in self.images:
@@ -621,10 +745,15 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
     def __init__(self, application, conf_path: str, hook_path: str):
         super().__init__(application=application, title="Noctalia Theme Wallpaper")
         self.set_default_size(960, 740)
+        Gtk.Window.set_default_icon_name("theme-wallpaper-gui")
+        self.set_icon_name("theme-wallpaper-gui")
         self.conf_path = conf_path
         self.hook_path = hook_path
         self.cfg = Config(conf_path)
         self._loading = True
+
+        self.session, self.session_label = detect_session()
+        self.env_prefix = "KDE" if self.session == "kde" else ""
 
         header = Adw.HeaderBar()
         open_button = Gtk.Button(label="Open file")
@@ -643,24 +772,26 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
         self._all_rows: list = []
         self._dots: list = []
 
-        # A TabView with its own bar, because a bare ViewStack shows no way to
-        # reach the second page. append() wraps each child in an AdwTabPage,
-        # and that page's title is what the tab bar shows, so set it here
-        # rather than on the PreferencesPage.
-        self.tabs = Adw.TabView()
-        self.tabs.append(self.desktop_content)
-        self.tabs.append(self.lock_content)
-        self.tabs.append(self.palette_content)
-        for page, title, icon in (
-            (self.tabs.get_nth_page(0), DESKTOP_PAGE, "preferences-desktop-wallpaper-symbolic"),
-            (self.tabs.get_nth_page(1), LOCKSCREEN_PAGE, "system-lock-screen-symbolic"),
-            (self.tabs.get_nth_page(2), PALETTE_PAGE, "applications-graphics-symbolic"),
-        ):
-            page.set_title(title)
-            page.set_icon(Gio.ThemedIcon.new(icon))
+        self.stack = Adw.ViewStack(vexpand=True)
+        pages = [
+            (self.desktop_content, "desktop", DESKTOP_PAGE, "preferences-desktop-wallpaper-symbolic"),
+        ]
+        if self.session == "kde":
+            pages.append((self.lock_content, "lockscreen", LOCKSCREEN_PAGE, "system-lock-screen-symbolic"))
+        else:
+            pages.append((self.palette_content, "palette", PALETTE_PAGE, "applications-graphics-symbolic"))
 
-        footer = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8, margin_top=6,
-                         margin_bottom=6, margin_start=12, margin_end=12)
+        for widget, name, title, icon in pages:
+            self.stack.add_titled_with_icon(widget, name, title, icon)
+
+        footer = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            spacing=8,
+            margin_top=6,
+            margin_bottom=6,
+            margin_start=12,
+            margin_end=12,
+        )
         self.apply_button = Gtk.Button(label="Apply now", tooltip_text="Run the hook for the current mode")
         self.apply_button.add_css_class("suggested-action")
         self.apply_button.connect("clicked", lambda _b: self._apply(False))
@@ -670,18 +801,33 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
         footer.append(self.dry_button)
 
         content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        content.append(self.tabs)
+        content.append(self.stack)
         content.append(footer)
 
         self.toasts = Adw.ToastOverlay(child=content)
         toolbar = Adw.ToolbarView(content=self.toasts)
         toolbar.add_top_bar(header)
-        toolbar.add_top_bar(Adw.TabBar(view=self.tabs, autohide=False))
+
+        # Inform the user of the active session
+        self.session_banner = Adw.Banner(title=self.session_label)
+        self.session_banner.set_revealed(True)
+        toolbar.add_top_bar(self.session_banner)
+
+        switcher = Adw.ViewSwitcher(
+            stack=self.stack,
+            policy=Adw.ViewSwitcherPolicy.WIDE,
+            halign=Gtk.Align.CENTER,
+            margin_top=4,
+            margin_bottom=4,
+        )
+        toolbar.add_top_bar(switcher)
         self.set_content(toolbar)
 
         self._build_desktop_page()
-        self._build_lockscreen_page()
-        self._build_palette_page()
+        if self.session == "kde":
+            self._build_lockscreen_page()
+        else:
+            self._build_palette_page()
 
         # The wallpaper on screen needs a border of its own, so it can be told
         # apart from the image that is selected in the picker.
@@ -692,8 +838,7 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
         )
 
         # The desktop changes without the window being told, so the window
-        # looks at the world now and then. Without this the swatches show a
-        # palette that is no longer the one on screen.
+        # looks at the world now and then.
         self._watch = GLib.timeout_add_seconds(3, self._tick)
 
         self._loading = False
@@ -704,13 +849,13 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
 
         now = Adw.PreferencesGroup(title="Right now")
         page.add(now)
-        self.mode_row = Adw.ActionRow(title="The theme mode")
+        self.schedule_row = Adw.ActionRow(title="The theme mode")
         self.mode_button = Gtk.Button(label="Follow the day and night")
         self.mode_button.set_valign(Gtk.Align.CENTER)
         self.mode_button.add_css_class("suggested-action")
         self.mode_button.connect("clicked", lambda _b: self._restore_schedule())
-        self.mode_row.add_suffix(self.mode_button)
-        now.add(self.mode_row)
+        self.schedule_row.add_suffix(self.mode_button)
+        now.add(self.schedule_row)
 
         self.now_row = Adw.ActionRow(title="The wallpaper on screen")
         self.now_picture = Gtk.Picture()
@@ -747,6 +892,45 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
         bottom.add(self.mode_row)
         page.set_vexpand(True)
 
+    # ---------------------------------------------------------- lockscreen
+    def _build_lockscreen_page(self) -> None:
+        page = self.lock_content
+
+        now = Adw.PreferencesGroup(title="Right now")
+        page.add(now)
+        self.lock_now_row = Adw.ActionRow(title="The lock screen image")
+        now.add(self.lock_now_row)
+
+        top = Adw.PreferencesGroup()
+        page.add(top)
+
+        self.lock_sync = Adw.SwitchRow(
+            title="Keep the lock screen in sync",
+            subtitle="Write the image into the KDE lock screen settings on every switch",
+        )
+        self.lock_sync.connect("notify::active", self._on_lock_changed)
+        top.add(self.lock_sync)
+
+        self.lock_source = Adw.ComboRow(
+            title="Lock screen image",
+            model=Gtk.StringList.new(["Match the desktop wallpaper", "Use a different image"]),
+        )
+        self.lock_source.connect("notify::selected", self._on_lock_changed)
+        top.add(self.lock_source)
+
+        self.lock_desc = Adw.ActionRow()
+        top.add(self.lock_desc)
+
+        self.lock_pickers: list[PickerGroup] = []
+        for title, file_key, mirror in (
+            ("Light mode lock screen", "LOCKSCREEN_LIGHT_WALLPAPER", self.pickers[0]),
+            ("Dark mode lock screen", "LOCKSCREEN_DARK_WALLPAPER", self.pickers[1]),
+        ):
+            picker = PickerGroup(title, None, file_key, self._on_change, mirror=mirror)
+            page.add(picker)
+            self.lock_pickers.append(picker)
+        page.set_vexpand(True)
+
     # ------------------------------------------------------------- palette
     def _build_palette_page(self) -> None:
         page = self.palette_content
@@ -770,7 +954,6 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
         )
         self.variant_row.connect("notify::selected", self._on_variant_changed)
         top.add(self.variant_row)
-
 
         self.variant_desc = Adw.ActionRow()
         top.add(self.variant_desc)
@@ -817,77 +1000,49 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
         page.add(self.all_group)
         page.set_vexpand(True)
 
-    # ---------------------------------------------------------- lockscreen
-    def _build_lockscreen_page(self) -> None:
-        page = self.lock_content
-
-        now = Adw.PreferencesGroup(title="Right now")
-        page.add(now)
-        self.lock_now_row = Adw.ActionRow(title="The lock screen image")
-        now.add(self.lock_now_row)
-
-        top = Adw.PreferencesGroup()
-        page.add(top)
-
-        self.lock_sync = Adw.SwitchRow(
-            title="Keep the lock screen in sync",
-            subtitle="Write the image into the KDE lock screen settings on every switch",
-        )
-        self.lock_sync.connect("notify::active", self._on_lock_changed)
-        top.add(self.lock_sync)
-
-        self.lock_source = Adw.ComboRow(
-            title="Lock screen image",
-            model=Gtk.StringList.new(["Match the desktop wallpaper", "Use a different image"]),
-        )
-        self.lock_source.connect("notify::selected", self._on_lock_changed)
-        top.add(self.lock_source)
-
-        self.lock_desc = Adw.ActionRow()
-        top.add(self.lock_desc)
-
-        self.lock_pickers: list[PickerGroup] = []
-        for title, file_key, mirror in (
-            ("Light mode lock screen", "LOCKSCREEN_LIGHT_WALLPAPER", self.pickers[0]),
-            ("Dark mode lock screen", "LOCKSCREEN_DARK_WALLPAPER", self.pickers[1]),
-        ):
-            picker = PickerGroup(title, None, file_key, self._on_change, mirror=mirror)
-            page.add(picker)
-            self.lock_pickers.append(picker)
-        page.set_vexpand(True)
-
     # -------------------------------------------------------------- loading
     def load_config(self) -> None:
         self._loading = True
         self.cfg.load()
 
-        strategy = self.cfg.get("STRATEGY", "fixed").strip().lower()
+        strategy = self.cfg.get_scoped("STRATEGY", self.env_prefix, "fixed").strip().lower()
         index = STRATEGY_VALUES.index(strategy) if strategy in STRATEGY_VALUES else 0
         self.strategy_row.set_selected(index)
 
-        for picker in self.pickers + self.lock_pickers:
-            picker.load_from(self.cfg)
+        all_pickers = list(self.pickers)
+        if self.session == "kde" and hasattr(self, "lock_pickers"):
+            all_pickers += self.lock_pickers
 
-        self.lock_sync.set_active(self.cfg.get("LOCKSCREEN_SYNC", "true") != "false")
-        self.lock_source.set_selected(
-            0 if self.cfg.get("LOCKSCREEN_SOURCE", "desktop").strip().lower() == "desktop" else 1
-        )
+        for picker in self.pickers:
+            picker.load_from(self.cfg, self.env_prefix)
 
-        generator = self.cfg.get("PALETTE_GENERATOR", "noctalia").strip().lower()
-        values = [v for v, _l, _d in GENERATORS]
-        self.generator_row.set_selected(values.index(generator) if generator in values else 0)
-        variant = self.cfg.get("PALETTE_VARIANT", "duotone").strip().lower()
-        vvalues = [v for v, _l, _d in VARIANTS]
-        self.variant_row.set_selected(vvalues.index(variant) if variant in vvalues else 0)
-        behaviour = self.cfg.get("PALETTE_SAVED", "always").strip().lower()
-        svalues = [v for v, _l, _d in SAVED_BEHAVIOUR]
-        self.saved_row.set_selected(svalues.index(behaviour) if behaviour in svalues else 0)
+        if self.session == "kde" and hasattr(self, "lock_pickers"):
+            for picker in self.lock_pickers:
+                picker.load_from(self.cfg, "")
+            self.lock_sync.set_active(self.cfg.get("LOCKSCREEN_SYNC", "true") != "false")
+            self.lock_source.set_selected(
+                0 if self.cfg.get("LOCKSCREEN_SOURCE", "desktop").strip().lower() == "desktop" else 1
+            )
+
+        if self.session != "kde":
+            generator = self.cfg.get("PALETTE_GENERATOR", "noctalia").strip().lower()
+            values = [v for v, _l, _d in GENERATORS]
+            self.generator_row.set_selected(values.index(generator) if generator in values else 0)
+            variant = self.cfg.get("PALETTE_VARIANT", "duotone").strip().lower()
+            vvalues = [v for v, _l, _d in VARIANTS]
+            self.variant_row.set_selected(vvalues.index(variant) if variant in vvalues else 0)
+            behaviour = self.cfg.get("PALETTE_SAVED", "always").strip().lower()
+            svalues = [v for v, _l, _d in SAVED_BEHAVIOUR]
+            self.saved_row.set_selected(svalues.index(behaviour) if behaviour in svalues else 0)
 
         self._loading = False
         self._update_visibility()
-        self._update_palette_visibility()
+        if self.session != "kde":
+            self._update_palette_visibility()
         self._update_mode_label()
-        self._refresh_palette()
+        self._refresh_now()
+        if self.session != "kde":
+            self._refresh_palette()
 
     def _strategy(self) -> str:
         index = self.strategy_row.get_selected()
@@ -907,29 +1062,32 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
                 continue
             if folder_mode:
                 picker.folder_row.set_title("Folder this mode picks from")
-                picker.folder_row.set_tooltip_text("Saved as LIGHT_DIR or DARK_DIR")
+                pfx = f"{self.env_prefix}_" if self.env_prefix else ""
+                picker.folder_row.set_tooltip_text(f"Saved as {pfx}LIGHT_DIR or {pfx}DARK_DIR")
             else:
                 picker.folder_row.set_title("Folder to browse")
                 picker.folder_row.set_tooltip_text("Not saved unless the strategy uses a folder")
 
-        lock_on = self.lock_sync.get_active()
-        custom = self.lock_source.get_selected() == 1
-        self.lock_source.set_sensitive(lock_on)
-        self.lock_desc.set_sensitive(lock_on)
-        if not lock_on:
-            self.lock_desc.set_title("The lock screen is left untouched")
-        elif custom:
-            self.lock_desc.set_title("Each mode uses its own lock screen image")
-        else:
-            self.lock_desc.set_title("The lock screen mirrors the desktop wallpaper")
-        for picker in self.lock_pickers:
-            picker.set_visible(lock_on and custom)
+        if self.session == "kde" and hasattr(self, "lock_sync"):
+            lock_on = self.lock_sync.get_active()
+            custom = self.lock_source.get_selected() == 1
+            self.lock_source.set_sensitive(lock_on)
+            self.lock_desc.set_sensitive(lock_on)
+            if not lock_on:
+                self.lock_desc.set_title("The lock screen is left untouched")
+            elif custom:
+                self.lock_desc.set_title("Each mode uses its own lock screen image")
+            else:
+                self.lock_desc.set_title("The lock screen mirrors the desktop wallpaper")
+            for picker in self.lock_pickers:
+                picker.set_visible(lock_on and custom)
 
     # ------------------------------------------------------- palette actions
     def _tick(self) -> bool:
         """Look at the world now and then, and follow it."""
         try:
-            self._refresh_palette()
+            if self.session != "kde":
+                self._refresh_palette()
             self._refresh_now()
         except Exception:
             pass
@@ -937,9 +1095,12 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
 
     def _restore_schedule(self) -> None:
         """Put the mode back to auto, so the day and night schedule works."""
+        if self.session == "kde":
+            self.toasts.add_toast(Adw.Toast.new("KDE Plasma follows your system color scheme"))
+            return
         try:
             done = subprocess.run(
-                ["noctalia", "msg", "theme-mode-set", "auto"],
+                [noctalia_bin(), "msg", "theme-mode-set", "auto"],
                 capture_output=True, text=True, timeout=15,
             )
         except (OSError, subprocess.SubprocessError) as exc:
@@ -952,27 +1113,32 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
             self.toasts.add_toast(Adw.Toast.new("Noctalia would not take that"))
 
     def _refresh_now(self) -> None:
-        """Show what the desktop is showing, on both tabs."""
-        configured = self._configured_mode()
-        if configured in ("dark", "light"):
-            self.mode_row.set_title("The theme mode is pinned")
-            self.mode_row.set_subtitle(
-                f"It is set to {configured}, so the day and night schedule never runs"
-            )
-            self.mode_button.set_visible(True)
-        elif configured == "auto":
-            self.mode_row.set_title("The theme mode")
-            self.mode_row.set_subtitle("It follows the day and night")
+        """Show what the desktop is showing."""
+        if self.session == "kde":
+            kde_mode = current_kde_theme_mode()
+            self.schedule_row.set_title("The theme mode")
+            self.schedule_row.set_subtitle(f"KDE Plasma is currently in {kde_mode} mode")
             self.mode_button.set_visible(False)
         else:
-            self.mode_row.set_title("The theme mode")
-            self.mode_row.set_subtitle("It could not be read just now")
-            self.mode_button.set_visible(False)
+            configured = self._configured_mode()
+            if configured in ("dark", "light"):
+                self.schedule_row.set_title("The theme mode is pinned")
+                self.schedule_row.set_subtitle(
+                    f"It is set to {configured}, so the day and night schedule never runs"
+                )
+                self.mode_button.set_visible(True)
+            elif configured == "auto":
+                self.schedule_row.set_title("The theme mode")
+                self.schedule_row.set_subtitle("It follows the day and night")
+                self.mode_button.set_visible(False)
+            else:
+                self.schedule_row.set_title("The theme mode")
+                self.schedule_row.set_subtitle("It could not be read just now")
+                self.mode_button.set_visible(False)
+
         wallpaper = self._current_wallpaper()
         self.now_row.set_title("The wallpaper on screen")
         self.now_row.set_subtitle(os.path.basename(wallpaper) if wallpaper else "Nothing yet")
-        # Show the picture itself, so the tab shows the wallpaper and not
-        # only its file name.
         if wallpaper:
             texture = make_thumbnail(wallpaper)
             if texture is not None:
@@ -983,57 +1149,35 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
         else:
             self.now_picture.set_visible(False)
 
-        lock = self._current_lock_screen()
-        self.lock_now_row.set_title("The lock screen image")
-        self.lock_now_row.set_subtitle(os.path.basename(lock) if lock else "Nothing yet")
+        if self.session == "kde" and hasattr(self, "lock_now_row"):
+            lock = current_kde_lockscreen()
+            self.lock_now_row.set_title("The lock screen image")
+            self.lock_now_row.set_subtitle(os.path.basename(lock) if lock else "Nothing yet")
 
-        # The lock screen follows the desktop, so the desktop path is the one
-        # worth marking in the pickers.
         for picker in self.pickers:
             picker.set_current(wallpaper)
 
     def _configured_mode(self) -> str:
-        """The mode Noctalia is set to, which is not always the mode it shows.
-
-        The mode in the settings can be dark or light, and then the day and
-        night schedule never runs. The mode that Noctalia reports is the one
-        it resolved, so the setting has to be read from the config.
-        """
+        if self.session == "kde":
+            return current_kde_theme_mode()
         try:
             done = subprocess.run(
-                ["noctalia", "config", "export"], capture_output=True, text=True, timeout=20
+                [noctalia_bin(), "config", "export"], capture_output=True, text=True, timeout=20
             )
             data = tomllib.loads(done.stdout)
             mode = str(data.get("theme", {}).get("mode", ""))
         except (OSError, ValueError, subprocess.SubprocessError):
-            # Keep the last known value rather than blanking the row.
             return self._configured_mode_cache
         if mode:
             self._configured_mode_cache = mode
         return mode
 
-    def _current_lock_screen(self) -> str:
-        """The image the KDE lock screen shows right now.
-
-        The file lives in the config folder next to the Noctalia one, which is
-        where KDE keeps it and where the hook writes it.
-        """
-        path = os.environ.get(
-            "THEME_WALLPAPER_LOCKSCREEN_RC", os.path.expanduser("~/.config/kscreenlockerrc")
-        )
-        try:
-            with open(path, encoding="utf-8") as handle:
-                for line in handle:
-                    if line.startswith("Image="):
-                        return line.split("=", 1)[1].strip()
-        except OSError:
-            pass
-        return ""
-
     def _current_wallpaper(self) -> str:
+        if self.session == "kde":
+            return current_kde_wallpaper()
         try:
             done = subprocess.run(
-                ["noctalia", "msg", "wallpaper-get"], capture_output=True, text=True, timeout=10
+                [noctalia_bin(), "msg", "wallpaper-get"], capture_output=True, text=True, timeout=10
             )
         except (OSError, subprocess.SubprocessError):
             return ""
@@ -1174,7 +1318,7 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
         mode = ""
         try:
             done = subprocess.run(
-                ["noctalia", "msg", "theme-mode-get"], capture_output=True, text=True, timeout=10
+                [noctalia_bin(), "msg", "theme-mode-get"], capture_output=True, text=True, timeout=10
             )
             mode = done.stdout.strip()
         except (OSError, subprocess.SubprocessError):
@@ -1284,12 +1428,12 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
         dialog.connect("response", on_response)
         dialog.present(self)
 
-    def _write_palette_to(self, name: str, palette: dict, wallpaper: str, saved: bool) -> None:
+    def _write_palette_to(self, name: str, palette: dict, wallpaper: str, saved: bool) -> str | None:
         """Write a palette into the folder Noctalia reads."""
         safe = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in name).strip("-")
         if not safe:
             self.toasts.add_toast(Adw.Toast.new("That name cannot be used"))
-            return
+            return None
         folder = palette_dir()
         try:
             os.makedirs(folder, exist_ok=True)
@@ -1315,7 +1459,7 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
             os.replace(temporary, path)
         except OSError as exc:
             self.toasts.add_toast(Adw.Toast.new(f"Could not save: {exc}"))
-            return
+            return None
         self._refresh_saved_palettes(wallpaper)
         return safe
 
@@ -1416,7 +1560,7 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
     def _apply_palette(self, name: str) -> None:
         try:
             done = subprocess.run(
-                ["noctalia", "msg", "color-scheme-set", "custom", name],
+                [noctalia_bin(), "msg", "color-scheme-set", "custom", name],
                 capture_output=True, text=True, timeout=15,
             )
         except (OSError, subprocess.SubprocessError) as exc:
@@ -1431,7 +1575,7 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
         """The name of the palette Noctalia is using, or an empty string."""
         try:
             done = subprocess.run(
-                ["noctalia", "msg", "color-scheme-get"], capture_output=True, text=True, timeout=10
+                [noctalia_bin(), "msg", "color-scheme-get"], capture_output=True, text=True, timeout=10
             )
         except (OSError, subprocess.SubprocessError):
             return ""
@@ -1463,12 +1607,11 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
             self.save_config(silent=True)
 
     def _on_lock_changed(self, *_args) -> None:
-        # Switching to a separate lock screen image starts from the desktop
-        # choice, so the two pages do not open in a half-empty state.
-        if self.lock_source.get_selected() == 1:
-            for lock_picker, desktop_picker in zip(self.lock_pickers, self.pickers):
-                if not lock_picker.current_file() and desktop_picker.current_file():
-                    lock_picker.set_file(desktop_picker.current_file())
+        if self.session == "kde" and hasattr(self, "lock_source"):
+            if self.lock_source.get_selected() == 1 and hasattr(self, "lock_pickers"):
+                for lock_picker, desktop_picker in zip(self.lock_pickers, self.pickers):
+                    if not lock_picker.current_file() and desktop_picker.current_file():
+                        lock_picker.set_file(desktop_picker.current_file())
         if not self._loading:
             self.save_config(silent=True)
         self._update_visibility()
@@ -1492,16 +1635,17 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
 
     def _update_mode_label(self) -> None:
         mode = current_theme_mode()
+        env_name = "KDE Plasma" if self.session == "kde" else "Noctalia"
         if mode in ("light", "dark"):
-            self.mode_row.set_title(f"Noctalia is currently in {mode}")
+            self.mode_row.set_title(f"{env_name} is currently in {mode} mode")
             self.mode_row.set_subtitle("Apply now sets the wallpaper for that mode")
         else:
-            self.mode_row.set_title(f"Noctalia reports mode {mode}")
+            self.mode_row.set_title(f"{env_name} reports mode {mode}")
             self.mode_row.set_subtitle("The hook needs light or dark to pick an image")
         self._sync_color_scheme(mode)
 
     def _sync_color_scheme(self, mode: str) -> None:
-        """Follow Noctalia's mode, so the window matches the desktop it configures.
+        """Follow the environment's mode, so the window matches the desktop it configures.
 
         AdwStyleManager is the supported route. Setting the old GtkSettings
         prefer-dark-theme key is unsupported under libadwaita and warns.
@@ -1520,25 +1664,28 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
             self.load_config()
             return
         strategy = self._strategy()
-        self.cfg.set("STRATEGY", strategy)
+        self.cfg.set_scoped("STRATEGY", strategy, self.env_prefix)
 
         for picker in self.pickers:
             if strategy in ("random", "cycle"):
-                self.cfg.set(picker.folder_key, picker.current_folder())
-            self.cfg.set(picker.file_key, picker.current_file())
+                self.cfg.set_scoped(picker.folder_key, picker.current_folder(), self.env_prefix)
+            self.cfg.set_scoped(picker.file_key, picker.current_file(), self.env_prefix)
 
-        lock_on = self.lock_sync.get_active()
-        custom = self.lock_source.get_selected() == 1
-        self.cfg.set("LOCKSCREEN_SYNC", "true" if lock_on else "false")
-        self.cfg.set("LOCKSCREEN_SOURCE", "custom" if custom else "desktop")
-        for picker in self.lock_pickers:
-            if lock_on and custom:
-                self.cfg.set(picker.file_key, picker.current_file())
+        if self.session == "kde" and hasattr(self, "lock_sync"):
+            lock_on = self.lock_sync.get_active()
+            custom = self.lock_source.get_selected() == 1
+            self.cfg.set("LOCKSCREEN_SYNC", "true" if lock_on else "false")
+            self.cfg.set("LOCKSCREEN_SOURCE", "custom" if custom else "desktop")
+            if hasattr(self, "lock_pickers"):
+                for picker in self.lock_pickers:
+                    if lock_on and custom:
+                        self.cfg.set(picker.file_key, picker.current_file())
 
-        self.cfg.set("PALETTE_GENERATOR", self._generator())
-        self.cfg.set("PALETTE_VARIANT", self._variant())
-        self.cfg.set("PALETTE_SEED", str(self._seed()))
-        self.cfg.set("PALETTE_SAVED", self._saved_behaviour())
+        if self.session != "kde":
+            self.cfg.set("PALETTE_GENERATOR", self._generator())
+            self.cfg.set("PALETTE_VARIANT", self._variant())
+            self.cfg.set("PALETTE_SEED", str(self._seed()))
+            self.cfg.set("PALETTE_SAVED", self._saved_behaviour())
 
         try:
             self.cfg.save()

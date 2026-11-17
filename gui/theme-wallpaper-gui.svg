@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <clipPath id="card-clip">
+      <rect x="8" y="8" width="112" height="112" rx="24" ry="24"/>
+    </clipPath>
+    <linearGradient id="day-sky" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#bae6fd"/>
+    </linearGradient>
+    <linearGradient id="night-sky" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e1b4b"/>
+      <stop offset="100%" stop-color="#312e81"/>
+    </linearGradient>
+    <linearGradient id="sun-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fde047"/>
+      <stop offset="100%" stop-color="#f59e0b"/>
+    </linearGradient>
+  </defs>
+
+  <g clip-path="url(#card-clip)">
+    <!-- Night half (base) -->
+    <rect x="8" y="8" width="112" height="112" fill="url(#night-sky)"/>
+
+    <!-- Day half (diagonal split) -->
+    <polygon points="8,8 88,8 40,120 8,120" fill="url(#day-sky)"/>
+
+    <!-- Sun in day half -->
+    <circle cx="34" cy="38" r="13" fill="url(#sun-grad)"/>
+
+    <!-- Moon and stars in night half -->
+    <path d="M92 26 A13 13 0 1 0 105 43 A10 10 0 1 1 92 26 Z" fill="#e2e8f0"/>
+    <circle cx="80" cy="24" r="1.8" fill="#cbd5e1"/>
+    <circle cx="104" cy="54" r="1.5" fill="#cbd5e1"/>
+
+    <!-- Back mountain ridge -->
+    <polygon points="8,92 38,62 66,86 92,56 120,86 120,120 8,120" fill="#334155" opacity="0.65"/>
+
+    <!-- Front mountain ridge -->
+    <polygon points="8,104 28,80 56,102 82,74 120,106 120,120 8,120" fill="#0f172a" opacity="0.88"/>
+
+    <!-- Subtle diagonal divider highlight -->
+    <line x1="88" y1="8" x2="40" y2="120" stroke="#ffffff" stroke-opacity="0.35" stroke-width="2"/>
+  </g>
+
+  <!-- Outer subtle border for contrast on light and dark themes -->
+  <rect x="8" y="8" width="112" height="112" rx="24" ry="24" fill="none" stroke="#ffffff" stroke-opacity="0.18" stroke-width="2"/>
+</svg>

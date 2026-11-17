@@ -1,11 +1,12 @@
 [Desktop Entry]
 Type=Application
-Name=Noctalia Theme Wallpaper
+Name=Theme Wallpaper Settings
 GenericName=Wallpaper settings
-Comment=Choose the wallpaper that follows Noctalia's light and dark theme modes
+Comment=Choose wallpapers that follow KDE Plasma and Noctalia light and dark theme modes
 Exec=__GUI__
-Icon=preferences-desktop-wallpaper
+Icon=theme-wallpaper-gui
+StartupWMClass=dev.local.NoctaliaThemeWallpaper
 Terminal=false
 Categories=Settings;DesktopSettings;GTK;
 StartupNotify=true
-Keywords=wallpaper;theme;dark;light;noctalia;
+Keywords=wallpaper;theme;dark;light;noctalia;kde;plasma;desktop;

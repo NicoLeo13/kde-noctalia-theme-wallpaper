@@ -1,0 +1,17 @@
+[Unit]
+Description=Wallpaper Switcher & Daylight Sync Daemon for KDE Plasma
+Documentation=https://github.com/NicoLeo13/kde-noctalia-theme-wallpaper
+PartOf=plasma-workspace.target
+After=plasma-workspace.target
+
+[Service]
+Type=simple
+ExecCondition=/usr/lib/systemd/systemd-xdg-autostart-condition "KDE" ""
+ExecStart=%h/.local/bin/wallpaper-switcher-plasma
+Restart=always
+RestartSec=3s
+Slice=app.slice
+
+[Install]
+WantedBy=plasma-workspace.target
+

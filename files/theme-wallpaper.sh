@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 #
-# theme-wallpaper.sh -- apply a wallpaper that matches Noctalia's resolved theme mode.
+# theme-wallpaper.sh -- apply a wallpaper that matches the active theme mode in KDE Plasma or Noctalia.
 #
-# Wired to Noctalia's `theme_mode_changed` and `started` hooks. Reads the resolved
-# mode from $NOCTALIA_THEME_MODE (falling back to `noctalia msg theme-mode-get`) and
-# applies the wallpaper configured for that mode.
+# Supported environments:
+# - Noctalia (KineticWE): Wired to `theme_mode_changed` and `started` hooks. Reads mode
+#   from $NOCTALIA_THEME_MODE (falling back to msg theme-mode-get) and applies with msg wallpaper-set.
+# - KDE Plasma: Invoked by wallpaper-switcher-plasma daemon or manual script run.
+#   Applies wallpaper natively via `plasma-apply-wallpaperimage` and syncs the lockscreen.
 #
-# Config: ~/.config/noctalia/theme-wallpaper.conf  (see the .example file)
+# Config: ~/.config/noctalia-kwe/theme-wallpaper.conf  (see the .example file)
 #
 # Set THEME_WALLPAPER_DRY_RUN=1 to log the decision without touching the wallpaper.
 
@@ -14,10 +16,25 @@
 # rather than kill the hook, and a missing wallpaper must never blank the desktop.
 set -uo pipefail
 
-CONF="${THEME_WALLPAPER_CONF:-$HOME/.config/noctalia/theme-wallpaper.conf}"
+if [[ -n "${NOCTALIA_BIN:-}" ]]; then
+	NOCTALIA="$NOCTALIA_BIN"
+elif command -v noctalia-kwe >/dev/null 2>&1; then
+	NOCTALIA="noctalia-kwe"
+else
+	NOCTALIA="noctalia"
+fi
+
+if [[ "$(basename -- "$NOCTALIA")" == "noctalia-kwe" ]]; then
+	NOCTALIA_DIR_NAME="noctalia-kwe"
+else
+	NOCTALIA_DIR_NAME="noctalia"
+fi
+
+CONFIG_DIR="${NOCTALIA_CONFIG_HOME:-${XDG_CONFIG_HOME:-$HOME/.config}/$NOCTALIA_DIR_NAME}"
+CONF="${THEME_WALLPAPER_CONF:-$CONFIG_DIR/theme-wallpaper.conf}"
 # Noctalia keeps its custom palettes next to this file, in a "palettes" folder.
 PALETTE_DIR="${THEME_WALLPAPER_PALETTE_DIR:-$(dirname -- "$CONF")/palettes}"
-STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/noctalia"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/$NOCTALIA_DIR_NAME"
 LOG_TAG="noctalia-theme-wallpaper"
 DRY_RUN="${THEME_WALLPAPER_DRY_RUN:-0}"
 
@@ -60,13 +77,34 @@ load_conf() {
 	return 0
 }
 
+# Environment / session detection: KDE Plasma vs Noctalia
+detect_session() {
+	local xdg="${XDG_CURRENT_DESKTOP:-}"
+	local kde_full="${KDE_FULL_SESSION:-}"
+	if [[ "${xdg^^}" == *"KDE"* || "${kde_full,,}" == "true" ]]; then
+		printf 'kde'
+	else
+		printf 'noctalia'
+	fi
+}
+
+SESSION="$(detect_session)"
+
 # cfg <key> <default>
+# If running in KDE, check KDE_<key> first before falling back to <key>.
 cfg() {
-	local v="${CFG[$1]-}"
+	local key="$1" default="$2" pfx=""
+	[[ "$SESSION" == "kde" ]] && pfx="KDE_"
+	local v="${CFG[${pfx}${key}]-}"
+	if [[ -n "$v" ]]; then
+		printf '%s' "$v"
+		return 0
+	fi
+	v="${CFG[$key]-}"
 	if [[ -n "$v" ]]; then
 		printf '%s' "$v"
 	else
-		printf '%s' "$2"
+		printf '%s' "$default"
 	fi
 }
 
@@ -85,37 +123,10 @@ expand() {
 
 load_conf || bail "config not readable: $CONF"
 
-# ---------------------------------------------------------------- resolve mode
-# `theme_mode_changed` provides this. The `started` hook does not, so ask Noctalia.
-mode="${NOCTALIA_THEME_MODE:-}"
-if [[ -z "$mode" ]]; then
-	mode="$(noctalia msg theme-mode-get 2>/dev/null | tr -d '[:space:]')"
-fi
-case "$mode" in
-dark | light) ;;
-*) bail "could not resolve theme mode (got '${mode:-empty}')" ;;
-esac
-
-if [[ "$mode" == "dark" ]]; then
-	dir_key="DARK_DIR"
-	file_key="DARK_WALLPAPER"
-else
-	dir_key="LIGHT_DIR"
-	file_key="LIGHT_WALLPAPER"
-fi
-
-strategy="$(cfg STRATEGY fixed)"
-strategy="${strategy,,}"
-
-# ------------------------------------------------------------ KDE lock screen
-# kscreenlocker_greet reads its background from the Greeter group in
-# kscreenlockerrc every time the screen locks, so writing the file before a lock
-# is enough. There is no reload step and no daemon.
-
+# ------------------------------------------------------------ KDE helpers
 LOCKSCREEN_RC="${THEME_WALLPAPER_LOCKSCREEN_RC:-$HOME/.config/kscreenlockerrc}"
 LOCKSCREEN_GROUP='[Greeter][Wallpaper][org.kde.image][General]'
 
-# KDE stores a URL, so encode the two characters that appear in real paths.
 url_encode() {
 	local s="$1" out="" i c
 	for ((i = 0; i < ${#s}; i++)); do
@@ -130,9 +141,6 @@ url_encode() {
 	printf '%s' "$out"
 }
 
-# Rewrite Image= and PreviewImage= inside the Greeter group, creating the group
-# when it is absent. Every other key in the file is preserved, and the write is
-# atomic, because KDE also writes this file from its own settings page.
 set_lockscreen_image() {
 	local image="$1"
 	local file="$LOCKSCREEN_RC"
@@ -141,17 +149,12 @@ set_lockscreen_image() {
 	local i saw_group=0 saw_image=0 saw_prev=0 in_group=0
 	local tmp perms dir base target
 
-	# Refuse anything that does not look like a settings file, so a stray
-	# THEME_WALLPAPER_LOCKSCREEN_RC cannot append INI to an unrelated file.
 	base="$(basename -- "$file")"
 	case "$base" in
 	*.rc | *.conf | kscreenlockerrc) ;;
 	*) log "lockscreen: $base does not look like a settings file (skipped)"; return 0 ;;
 	esac
 
-	# Follow a symlink and write to the real file. Without this, mv would
-	# replace the link itself, and stat would report the link mode, which
-	# is always 0777, leaving a world-writable settings file behind.
 	target="$(readlink -f -- "$file" 2>/dev/null || printf '%s' "$file")"
 	[[ -f "$target" ]] || {
 		log "lockscreen: no $file (skipped)"
@@ -163,9 +166,6 @@ set_lockscreen_image() {
 		return 0
 	}
 
-	# Rewrite every matching group, not just the first. KConfig merges
-	# duplicate sections and the last value wins, so leaving a second copy
-	# untouched would silently keep the old image.
 	for ((i = 0; i < ${#lines[@]}; i++)); do
 		local stripped="${lines[i]%$'\r'}"
 		stripped="${stripped// /}"
@@ -204,7 +204,6 @@ set_lockscreen_image() {
 		done
 		new+=("" "$LOCKSCREEN_GROUP")
 	elif ((saw_image == 0 || saw_prev == 0)); then
-		# Add the missing keys right after the group header.
 		local -a merged=()
 		local inside=0
 		for line in ${new[@]+"${new[@]}"}; do
@@ -222,22 +221,17 @@ set_lockscreen_image() {
 		new=(${merged[@]+"${merged[@]}"})
 	fi
 
-	# Write beside the real file so the rename stays on one filesystem and
-	# stays atomic.
 	dir="$(dirname -- "$target")"
 	tmp="$dir/.${base}.twp.$$"
-	if ! printf '%s
-' "${new[@]}" >"$tmp"; then
+	if ! printf '%s\n' "${new[@]}" >"$tmp"; then
 		rm -f "$tmp"
 		log "lockscreen: cannot write $file (skipped)"
 		return 0
 	fi
 
-	# Nothing to do when the file already says the right thing. Rewriting an
-	# identical file replaces the inode, and that is what breaks the file
-	# watch a desktop uses to notice a theme change.
 	if [[ "$(printf '%s\n' "${new[@]}")" == "$(printf '%s\n' "${lines[@]}")" ]]; then
 		log "lockscreen: already set -> $(basename "$image")"
+		rm -f "$tmp"
 		return 0
 	fi
 
@@ -280,8 +274,6 @@ sync_lockscreen() {
 		fi
 		;;
 	*)
-		# The desktop wallpaper is already applied at this point, so this is
-		# an error, not a skip. Reporting "skipped" here would be false.
 		log "error: unknown LOCKSCREEN_SOURCE '${lock_source}' (use desktop or custom)"
 		return 0
 		;;
@@ -295,6 +287,69 @@ sync_lockscreen() {
 	set_lockscreen_image "$lock_image"
 }
 
+get_kde_current_wallpaper() {
+	local appletsrc="${THEME_WALLPAPER_APPLETSRC:-$HOME/.config/plasma-org.kde.plasma.desktop-appletsrc}"
+	[[ -r "$appletsrc" ]] || return 1
+	local line in_group=0 val=""
+	while IFS= read -r line || [[ -n "$line" ]]; do
+		line="${line%$'\r'}"
+		if [[ "$line" == \[* ]]; then
+			if [[ "$line" == *"[Wallpaper][org.kde.image][General]"* ]]; then
+				in_group=1
+			else
+				in_group=0
+			fi
+		elif ((in_group)) && [[ "$line" == Image=* ]]; then
+			val="${line#Image=}"
+			if [[ "$val" == "file://"* ]]; then
+				val="${val#file://}"
+				val="$(python3 -c "import urllib.parse, sys; print(urllib.parse.unquote(sys.argv[1]))" "$val" 2>/dev/null || printf '%s' "$val")"
+			fi
+			printf '%s' "$val"
+			return 0
+		fi
+	done <"$appletsrc"
+	return 1
+}
+
+# ---------------------------------------------------------------- resolve mode
+mode="${NOCTALIA_THEME_MODE:-}"
+if [[ -z "$mode" ]]; then
+	if [[ "$SESSION" == "kde" ]]; then
+		kde_scheme=""
+		if command -v kreadconfig6 >/dev/null 2>&1; then
+			kde_scheme="$(kreadconfig6 --file kdeglobals --group General --key ColorScheme 2>/dev/null || true)"
+		elif command -v kreadconfig5 >/dev/null 2>&1; then
+			kde_scheme="$(kreadconfig5 --file kdeglobals --group General --key ColorScheme 2>/dev/null || true)"
+		fi
+		if [[ -z "$kde_scheme" && -r "$HOME/.config/kdeglobals" ]]; then
+			kde_scheme="$(grep -E '^ColorScheme=' "$HOME/.config/kdeglobals" 2>/dev/null | cut -d= -f2- || true)"
+		fi
+		if [[ "${kde_scheme,,}" == *"dark"* ]]; then
+			mode="dark"
+		else
+			mode="light"
+		fi
+	else
+		mode="$("$NOCTALIA" msg theme-mode-get 2>/dev/null | tr -d '[:space:]')"
+	fi
+fi
+case "$mode" in
+dark | light) ;;
+*) bail "could not resolve theme mode (got '${mode:-empty}')" ;;
+esac
+
+if [[ "$mode" == "dark" ]]; then
+	dir_key="DARK_DIR"
+	file_key="DARK_WALLPAPER"
+else
+	dir_key="LIGHT_DIR"
+	file_key="LIGHT_WALLPAPER"
+fi
+
+strategy="$(cfg STRATEGY fixed)"
+strategy="${strategy,,}"
+
 # ------------------------------------------------------------------- palette
 # The palette is a pure function of the wallpaper, so one file is enough: going
 # back to a wallpaper regenerates the same palette it had before. A file per
@@ -304,7 +359,7 @@ sync_lockscreen() {
 # The file holds a dark and a light variant, so a theme mode change needs no
 # regeneration at all. Noctalia picks the variant that matches the mode.
 sync_palette() {
-	local wallpaper="$1" generator variant seed name out generator_script output scheme
+	local wallpaper="$1" generator variant seed name out generator_script output scheme saved
 
 	generator="$(cfg PALETTE_GENERATOR noctalia)"
 	case "$generator" in
@@ -312,7 +367,7 @@ sync_palette() {
 		# Noctalia owns the palette. Hand the source back to it so the
 		# wallpaper and its own scheme apply again.
 		scheme="$(cfg PALETTE_SCHEME m3-rainbow)"
-		if noctalia msg color-scheme-set wallpaper "$scheme" >/dev/null 2>&1; then
+		if "$NOCTALIA" msg color-scheme-set wallpaper "$scheme" >/dev/null 2>&1; then
 			log "palette: Noctalia owns it (scheme $scheme)"
 		else
 			log "palette: could not hand the palette back to Noctalia"
@@ -334,7 +389,7 @@ sync_palette() {
 	if [[ "$(cfg PALETTE_SAVED always)" == "prefer" ]]; then
 		saved="$(python3 "$generator_script" --find-saved --wallpaper "$wallpaper" \
 			--palette-dir "$PALETTE_DIR" 2>/dev/null || true)"
-		if [[ -n "$saved" ]] && noctalia msg color-scheme-set custom "$saved" >/dev/null 2>&1; then
+		if [[ -n "$saved" ]] && "$NOCTALIA" msg color-scheme-set custom "$saved" >/dev/null 2>&1; then
 			log "palette: using the saved palette $saved"
 			return 0
 		fi
@@ -354,7 +409,7 @@ sync_palette() {
 		return 0
 	fi
 
-	if ! noctalia msg color-scheme-set custom "$name" >/dev/null 2>&1; then
+	if ! "$NOCTALIA" msg color-scheme-set custom "$name" >/dev/null 2>&1; then
 		log "palette: could not apply $name (skipped)"
 		return 0
 	fi
@@ -365,12 +420,15 @@ sync_palette() {
 # Noctalia fires wallpaper_changed whenever the wallpaper is changed, by the
 # wallpaper panel, a plugin, or by this script. When something else changed it,
 # the desktop wallpaper is already correct and must not be changed back. Only
-# the lock screen needs reconciling, against the wallpaper that is on screen.
+# the palette needs reconciling, against the wallpaper that is on screen.
 if [[ -n "${NOCTALIA_WALLPAPER_PATH:-}" ]]; then
-	current="$(noctalia msg wallpaper-get 2>/dev/null | head -1 | tr -d '[:space:]')"
+	current="$("$NOCTALIA" msg wallpaper-get 2>/dev/null | head -1 | tr -d '[:space:]')"
 	[[ -n "$current" ]] || bail "wallpaper_changed: could not read the current wallpaper"
 	log "wallpaper changed elsewhere: keeping $(basename "$current")"
-	sync_lockscreen "$mode" "$current"
+	if [[ "$DRY_RUN" == "1" || "$DRY_RUN" == "true" ]]; then
+		log "DRY RUN palette: would sync palette for $(basename "$current")"
+		exit 0
+	fi
 	sync_palette "$current"
 	exit 0
 fi
@@ -443,23 +501,34 @@ esac
 [[ -r "$chosen" ]] || bail "chosen wallpaper is not readable: $chosen"
 
 # ---------------------------------------------------------------- apply
-# The desktop wallpaper is skipped when it is already applied, but the lock
-# screen is still reconciled, because the two can drift apart.
 if [[ "$DRY_RUN" == "1" || "$DRY_RUN" == "true" ]]; then
 	log "DRY RUN $mode ($strategy): would set $(basename "$chosen")"
+elif [[ "$SESSION" == "kde" ]]; then
+	current="$(get_kde_current_wallpaper || true)"
+	if [[ -n "$current" && "$current" == "$chosen" ]]; then
+		log "$mode: KDE desktop wallpaper already applied ($(basename "$chosen"))"
+	else
+		if command -v plasma-apply-wallpaperimage >/dev/null 2>&1; then
+			if plasma-apply-wallpaperimage "$chosen" >/dev/null 2>&1; then
+				log "$mode: set KDE wallpaper -> $chosen"
+			else
+				bail "plasma-apply-wallpaperimage failed for $chosen"
+			fi
+		else
+			log "warning: plasma-apply-wallpaperimage not found on PATH"
+		fi
+	fi
 else
-	current="$(noctalia msg wallpaper-get 2>/dev/null | head -1 | tr -d '[:space:]')"
+	current="$("$NOCTALIA" msg wallpaper-get 2>/dev/null | head -1 | tr -d '[:space:]')"
 	if [[ -n "$current" && "$current" == "$chosen" ]]; then
 		log "$mode: desktop wallpaper already applied ($(basename "$chosen"))"
 	else
 		connectors="$(cfg CONNECTORS "")"
 		if [[ -n "$connectors" ]]; then
 			ok=1
-			# Split on spaces without globbing. A bare `for c in $var` would
-			# also expand any `*` against the current directory.
 			read -r -a outputs <<<"$connectors"
 			for c in ${outputs[@]+"${outputs[@]}"}; do
-				if noctalia msg wallpaper-set "$c" "$chosen" >/dev/null 2>&1; then
+				if "$NOCTALIA" msg wallpaper-set "$c" "$chosen" >/dev/null 2>&1; then
 					log "$mode: set on $c -> $chosen"
 				else
 					log "$mode: FAILED on $c (is '$c' connected?)"
@@ -468,7 +537,7 @@ else
 			done
 			[[ "$ok" == "1" ]] || bail "one or more outputs failed"
 		else
-			if noctalia msg wallpaper-set "$chosen" >/dev/null 2>&1; then
+			if "$NOCTALIA" msg wallpaper-set "$chosen" >/dev/null 2>&1; then
 				log "$mode: set -> $chosen"
 			else
 				bail "wallpaper-set failed for $chosen"
@@ -477,6 +546,10 @@ else
 	fi
 fi
 
-sync_lockscreen "$mode" "$chosen"
+# ------------------------------------------------------------ lock screen
+# In KDE Plasma, synchronize the lock screen image if configured.
+if [[ "$SESSION" == "kde" ]]; then
+	sync_lockscreen "$mode" "$chosen"
+fi
 
 exit 0

@@ -14,9 +14,9 @@
 #
 # wallpaper_changed -> fires whenever the wallpaper changes, whoever changed it.
 #   The wallpaper panel and other tools do not change the theme mode, so without
-#   this the lock screen would keep an old image. The env var
-#   NOCTALIA_WALLPAPER_PATH holds the new path. The script uses this event to
-#   reconcile the lock screen only, and never changes the wallpaper back.
+#   this the custom palette generator would not run when you pick an image by hand.
+#   The env var NOCTALIA_WALLPAPER_PATH holds the new path. The script uses this
+#   event to sync the palette only, and never changes the wallpaper back.
 #
 # install.sh replaces __SCRIPT__ with the absolute path of the installed script,
 # so the hook does not depend on the shell expanding a home-directory variable.

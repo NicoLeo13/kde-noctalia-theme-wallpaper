@@ -1,5 +1,5 @@
 # theme-wallpaper.conf
-# Pick the wallpaper that matches Noctalia's resolved theme mode (dark/light).
+# Pick the wallpaper that matches the active theme mode (dark/light) in KDE Plasma or Noctalia.
 #
 # Lines are KEY=VALUE. Blank lines and lines starting with # are ignored.
 # Paths may be absolute or start with ~. Surrounding quotes are stripped.
@@ -38,23 +38,34 @@ CONNECTORS =
 # ------------------------------------------------------------- KDE lock screen
 # On KDE Plasma the lock screen is kscreenlocker_greet. It reads its background
 # from the Greeter group in ~/.config/kscreenlockerrc every time you lock, so the
-# hook just writes that file. Nothing else needs to reload.
+# hook writes that file. Nothing else needs to reload.
 #
 # LOCKSCREEN_SYNC = false disables this entirely and touches nothing.
 LOCKSCREEN_SYNC = true
 
 # desktop = the lock screen shows the same image as the desktop (default).
-#           Free: no extra paths to maintain, and it always agrees.
 # custom  = the lock screen uses its own image per mode, chosen below.
-#           Handy when you want locking to look different from the desktop.
 LOCKSCREEN_SOURCE = desktop
 
 # Only read when LOCKSCREEN_SOURCE = custom. Leave empty to fall back to the
 # desktop wallpaper for that mode, so a half-filled setup still behaves.
 LOCKSCREEN_DARK_WALLPAPER  =
 LOCKSCREEN_LIGHT_WALLPAPER =
+
+# ------------------------------------------------- KDE Plasma state overrides
+# If you use both KDE Plasma and Noctalia, you can set separate folders or
+# wallpapers for KDE. When set, these take priority in a KDE session, leaving
+# the base keys for Noctalia/KineticWE.
+#
+# KDE_STRATEGY = fixed
+# KDE_LIGHT_WALLPAPER = ~/Pictures/Wallpapers/light/kde-day.png
+# KDE_DARK_WALLPAPER  = ~/Pictures/Wallpapers/dark/kde-night.png
+# KDE_LIGHT_DIR       = ~/Pictures/Wallpapers/kde-light
+# KDE_DARK_DIR        = ~/Pictures/Wallpapers/kde-dark
+
 # ------------------------------------------------------------------- palette
-# Who generates the colour palette.
+# Who generates the colour palette. Note: in KDE Plasma, palettes are managed
+# by KDE Material You Colors and these settings are bypassed.
 #
 # noctalia -> Noctalia generates it from the wallpaper, with the scheme named in
 #             PALETTE_SCHEME. The tool does not touch the palette, so the
